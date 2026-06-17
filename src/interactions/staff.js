@@ -7,6 +7,7 @@ import {
 } from 'discord.js';
 import { getOrder, getOrderItems, updateOrder } from '../db/orders.js';
 import { getSellerByDiscordId } from '../db/sellers.js';
+import { incrementCouponUses } from '../db/coupons.js';
 import { gerarPixCopiaECola } from '../lib/pix.js';
 import { saleEmbed, brl } from '../lib/embeds.js';
 import { isStaff } from '../lib/permissions.js';
@@ -121,6 +122,13 @@ export async function handleApprove(interaction, orderId) {
   }
 
   await updateOrder(orderId, { status: 'paid', approved_by: interaction.user.id });
+
+  // Conta o uso do cupom só quando a venda é confirmada (carrinhos abandonados não gastam usos).
+  if (order.coupon_code) {
+    await incrementCouponUses(order.coupon_code).catch((e) =>
+      console.error('Falha ao contabilizar uso do cupom:', e),
+    );
+  }
 
   // Avisa o cliente que o pagamento foi confirmado e o arquivo já foi enviado.
   await interaction.channel.send({

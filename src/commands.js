@@ -12,8 +12,9 @@ import {
 } from 'discord.js';
 import { config } from './config.js';
 import { listActiveProducts, createProduct, deactivateProductBySku } from './db/products.js';
+import { createCoupon, deactivateCoupon, listCoupons, normalizeCode } from './db/coupons.js';
 import { browseCatalogRow, IDS } from './lib/components.js';
-import { brandEmbed, welcomeEmbed, announceEmbed } from './lib/embeds.js';
+import { brandEmbed, welcomeEmbed, announceEmbed, brl } from './lib/embeds.js';
 import { TICKET_IDS } from './interactions/tickets.js';
 
 const eph = { flags: MessageFlags.Ephemeral };
@@ -68,6 +69,51 @@ export const commandData = [
         .setRequired(true)
         .setAutocomplete(true),
     ),
+
+  new SlashCommandBuilder()
+    .setName('cupom-add')
+    .setDescription('Cria um cupom de desconto que o cliente aplica no carrinho.')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .addStringOption((o) =>
+      o.setName('codigo').setDescription('Código do cupom, ex.: BEMVINDO10').setRequired(true))
+    .addStringOption((o) =>
+      o
+        .setName('tipo')
+        .setDescription('Porcentagem (%) ou valor fixo (R$)')
+        .setRequired(true)
+        .addChoices(
+          { name: 'Porcentagem (%)', value: 'percent' },
+          { name: 'Valor fixo (R$)', value: 'fixed' },
+        ))
+    .addNumberOption((o) =>
+      o
+        .setName('valor')
+        .setDescription('Para %: 10 = 10%. Para R$: 20 = R$ 20 de desconto.')
+        .setRequired(true)
+        .setMinValue(0.01))
+    .addStringOption((o) =>
+      o.setName('expira').setDescription('Validade no formato AAAA-MM-DD (opcional).'))
+    .addIntegerOption((o) =>
+      o
+        .setName('limite')
+        .setDescription('Limite de usos (opcional). Ex.: 50 = vale só nas 50 primeiras vendas.')
+        .setMinValue(1)),
+
+  new SlashCommandBuilder()
+    .setName('cupom-remover')
+    .setDescription('Desativa um cupom (para de funcionar; histórico de usos é mantido).')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .addStringOption((o) =>
+      o
+        .setName('codigo')
+        .setDescription('Escolha o cupom a desativar')
+        .setRequired(true)
+        .setAutocomplete(true)),
+
+  new SlashCommandBuilder()
+    .setName('cupom-listar')
+    .setDescription('Lista os cupons cadastrados (ativos e inativos).')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 ].map((c) => c.toJSON());
 
 // Roteia o comando slash recebido.
@@ -85,22 +131,40 @@ export async function handleCommand(interaction) {
       return cmdProdutoAdd(interaction);
     case 'produto-remover':
       return cmdProdutoRemover(interaction);
+    case 'cupom-add':
+      return cmdCupomAdd(interaction);
+    case 'cupom-remover':
+      return cmdCupomRemover(interaction);
+    case 'cupom-listar':
+      return cmdCupomListar(interaction);
     default:
       return interaction.reply({ content: 'Comando desconhecido.', ...eph });
   }
 }
 
-// Autocomplete: sugere peds ativos pelo nome/SKU enquanto o staff digita.
+// Autocomplete: sugere peds ativos (produto-remover) ou cupons ativos (cupom-remover).
 export async function handleAutocomplete(interaction) {
-  if (interaction.commandName !== 'produto-remover') return interaction.respond([]);
   const query = interaction.options.getFocused().toLowerCase();
   try {
-    const products = await listActiveProducts();
-    const choices = products
-      .filter((p) => !query || p.name.toLowerCase().includes(query) || p.sku.toLowerCase().includes(query))
-      .slice(0, 25)
-      .map((p) => ({ name: `${p.name} — ${p.sku} (R$ ${Number(p.price).toFixed(2)})`.slice(0, 100), value: p.sku }));
-    await interaction.respond(choices);
+    if (interaction.commandName === 'produto-remover') {
+      const products = await listActiveProducts();
+      const choices = products
+        .filter((p) => !query || p.name.toLowerCase().includes(query) || p.sku.toLowerCase().includes(query))
+        .slice(0, 25)
+        .map((p) => ({ name: `${p.name} — ${p.sku} (R$ ${Number(p.price).toFixed(2)})`.slice(0, 100), value: p.sku }));
+      return interaction.respond(choices);
+    }
+
+    if (interaction.commandName === 'cupom-remover') {
+      const coupons = await listCoupons();
+      const choices = coupons
+        .filter((c) => c.active && (!query || c.code.toLowerCase().includes(query)))
+        .slice(0, 25)
+        .map((c) => ({ name: `${c.code} (${couponValueLabel(c)})`.slice(0, 100), value: c.code }));
+      return interaction.respond(choices);
+    }
+
+    return interaction.respond([]);
   } catch {
     await interaction.respond([]);
   }
@@ -259,4 +323,98 @@ async function cmdProdutoRemover(interaction) {
     }
     await interaction.editReply(`Erro ao remover: ${err.message}`);
   }
+}
+
+// Texto legível do valor de um cupom (ex.: "10%" ou "R$ 20,00").
+function couponValueLabel(c) {
+  return c.type === 'percent' ? `${Number(c.value)}%` : brl(c.value);
+}
+
+async function cmdCupomAdd(interaction) {
+  await interaction.deferReply(eph);
+
+  const code = normalizeCode(interaction.options.getString('codigo'));
+  const type = interaction.options.getString('tipo'); // 'percent' | 'fixed'
+  const value = interaction.options.getNumber('valor');
+  const expiraRaw = interaction.options.getString('expira');
+  const maxUses = interaction.options.getInteger('limite');
+
+  if (type === 'percent' && value > 100) {
+    return interaction.editReply('Para cupom de porcentagem, o valor não pode passar de 100.');
+  }
+
+  // Validade: aceita AAAA-MM-DD; converte pro fim do dia para o cupom valer o dia todo.
+  let expiresAt = null;
+  if (expiraRaw) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(expiraRaw.trim());
+    if (!m) {
+      return interaction.editReply('Data de validade inválida. Use o formato `AAAA-MM-DD` (ex.: 2026-12-31).');
+    }
+    const date = new Date(`${expiraRaw.trim()}T23:59:59`);
+    if (Number.isNaN(date.getTime())) {
+      return interaction.editReply('Data de validade inválida. Use o formato `AAAA-MM-DD` (ex.: 2026-12-31).');
+    }
+    expiresAt = date.toISOString();
+  }
+
+  try {
+    const coupon = await createCoupon({
+      code,
+      type,
+      value,
+      expires_at: expiresAt,
+      max_uses: maxUses ?? null,
+    });
+
+    const regras = [
+      `Desconto: **${couponValueLabel(coupon)}**`,
+      coupon.expires_at ? `Validade: até ${expiraRaw.trim()}` : 'Validade: sem expiração',
+      coupon.max_uses != null ? `Limite de usos: ${coupon.max_uses}` : 'Limite de usos: ilimitado',
+    ].join('\n');
+
+    await interaction.editReply(`✅ Cupom **${coupon.code}** criado.\n${regras}`);
+  } catch (err) {
+    // 23505 = violação de unique (código já existe).
+    if (err.code === '23505') {
+      return interaction.editReply(`Já existe um cupom com o código \`${code}\`.`);
+    }
+    await interaction.editReply(`Erro ao criar o cupom: ${err.message}`);
+  }
+}
+
+async function cmdCupomRemover(interaction) {
+  await interaction.deferReply(eph);
+  const code = normalizeCode(interaction.options.getString('codigo'));
+  try {
+    const coupon = await deactivateCoupon(code);
+    if (!coupon) {
+      return interaction.editReply(`Nenhum cupom ativo encontrado com o código \`${code}\`.`);
+    }
+    await interaction.editReply(`🗑️ Cupom **${coupon.code}** desativado. Não pode mais ser aplicado.`);
+  } catch (err) {
+    await interaction.editReply(`Erro ao desativar o cupom: ${err.message}`);
+  }
+}
+
+async function cmdCupomListar(interaction) {
+  await interaction.deferReply(eph);
+  const coupons = await listCoupons();
+  if (!coupons.length) {
+    return interaction.editReply('Nenhum cupom cadastrado ainda. Crie um com `/cupom-add`.');
+  }
+
+  const lines = coupons.map((c) => {
+    const status = c.active ? '🟢' : '⚪';
+    const partes = [`${status} **${c.code}** — ${couponValueLabel(c)}`];
+    if (c.expires_at) partes.push(`expira ${new Date(c.expires_at).toLocaleDateString('pt-BR')}`);
+    const usos = c.max_uses != null ? `${c.uses}/${c.max_uses} usos` : `${c.uses} usos`;
+    partes.push(usos);
+    return partes.join(' • ');
+  });
+
+  const embed = brandEmbed({ banner: false })
+    .setTitle('🏷️ Cupons cadastrados')
+    .setDescription(lines.join('\n').slice(0, 4000));
+
+  await interaction.editReply({ embeds: [embed] });
 }

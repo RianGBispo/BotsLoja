@@ -5,14 +5,15 @@ import { getOrderItems, recalcTotal, updateOrder } from '../db/orders.js';
 
 // Monta o payload (embed + componentes) da mensagem do carrinho.
 export async function buildCartPayload(order) {
-  const { items, total } = await recalcTotal(order.id);
-  const orderWithTotal = { ...order, total };
+  const { items, total, discount, coupon } = await recalcTotal(order.id);
+  const couponCode = coupon ? coupon.code : null;
+  const orderWithTotal = { ...order, total, discount, coupon_code: couponCode };
   const products = await listActiveProducts();
   const hasItems = items.length > 0;
 
   const components = [catalogSelectRow(products)];
   if (hasItems) components.push(editQtyRow(items));
-  components.push(cartActionsRow(hasItems));
+  components.push(cartActionsRow(hasItems, Boolean(couponCode)));
 
   return {
     embeds: [cartEmbed(orderWithTotal, items)],

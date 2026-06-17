@@ -173,8 +173,25 @@ Todos exigem a permissão **Gerenciar Servidor** (definida em cada comando).
 | `/painel` | Posta o painel público com o botão **Abrir ticket**. |
 | `/vitrine` | Publica **um embed + menu suspenso** com todos os peds no `CATALOG_CHANNEL_ID` (ou no canal atual). |
 | `/produto-add` | Cadastra um ped. Opções: `sku`, `nome`, `preco` (obrigatórias) e `descricao`, `categoria`, `compatibilidade`, `imagem` (opcionais). |
+| `/produto-remover` | Tira um ped do catálogo (autocomplete pelo nome/SKU). Pedidos antigos ficam intactos. |
+| `/cupom-add` | Cria um cupom de desconto. Opções: `codigo`, `tipo` (% ou R$ fixo), `valor` (obrigatórias) e `expira` (AAAA-MM-DD), `limite` de usos (opcionais). |
+| `/cupom-remover` | Desativa um cupom (autocomplete pelos cupons ativos). O histórico de usos é mantido. |
+| `/cupom-listar` | Lista os cupons cadastrados (ativos/inativos), com valor, validade e usos. |
 
 > Se você cadastrar/alterar peds, rode `/vitrine` de novo para republicar o menu atualizado.
+
+### Cupons de desconto
+
+O cliente aplica o cupom no próprio carrinho: há um botão **🏷️ Aplicar cupom** ao lado de **Finalizar
+e gerar Pix**. Ele digita o código num modal; o bot valida (existe? está ativo? expirou? estourou o
+limite de usos?) e, se ok, abate o desconto — o carrinho passa a mostrar **subtotal, desconto e total**, e
+o **Pix é gerado já com o valor com desconto**. Um botão **Remover cupom** aparece enquanto há um aplicado.
+
+- **Tipos:** porcentagem (`10` = 10%) ou valor fixo em reais (`20` = R$ 20). O desconto nunca passa do subtotal.
+- **Validade e limite são opcionais.** Sem eles, o cupom vale sempre e para qualquer número de vendas.
+- **O uso só é contabilizado quando a equipe APROVA o pedido** — carrinhos abandonados não gastam usos.
+- Se um cupom expirar/esgotar enquanto está no carrinho, o bot o **solta automaticamente** no próximo
+  recálculo (e no checkout), evitando gerar um Pix com desconto indevido.
 
 ---
 
@@ -200,15 +217,18 @@ cart ──(Finalizar e gerar Pix)──▶ pending_payment ──(cliente: "Já
 
 ## Banco de dados
 
-Schema completo em [supabase/schema.sql](supabase/schema.sql). Quatro tabelas:
+Schema completo em [supabase/schema.sql](supabase/schema.sql). Cinco tabelas:
 
 - **products** — peds do catálogo: `sku`, `name`, `description`, `price`, `category`,
   `compatibility`, `image_url`, `active`.
 - **sellers** — sócias/vendedoras: `discord_user_id` (quem assume), `name`, `pix_key`, `merchant_name`,
   `merchant_city`, `active`. Veja [Cadastrar as sócias](#cadastrar-as-sócias-vendedoras).
 - **orders** — pedidos: `order_number` (vira o `txid` `MN0042`), `discord_user_id`, `channel_id`,
-  `cart_message_id`, `status`, `total`, `pix_txid`, `claimed_by` (sócia que assumiu/recebe), `reject_reason`, `approved_by`.
+  `cart_message_id`, `status`, `total` (já com desconto), `discount`, `coupon_code`, `pix_txid`,
+  `claimed_by` (sócia que assumiu/recebe), `reject_reason`, `approved_by`.
 - **order_items** — itens do carrinho: `order_id`, `product_id`, `unit_price` (snapshot), `qty`.
+- **coupons** — cupons de desconto: `code`, `type` (`percent`/`fixed`), `value`, `expires_at`,
+  `max_uses`, `uses`, `active`. Criados pela equipe com `/cupom-add`.
 
 ### Migração (se já rodou um schema antigo)
 
@@ -224,6 +244,11 @@ Para o modelo "quem assume recebe" (tabela `sellers` + coluna `claimed_by`) — 
 `supabase/schema.sql` atualizado de novo: ele cria a tabela `sellers` e adiciona `claimed_by` de forma
 idempotente (`create table if not exists` + `alter table ... add column if not exists`), sem afetar o
 que já existe. Depois, [cadastre as sócias](#cadastrar-as-sócias-vendedoras).
+
+Para os **cupons de desconto** (tabela `coupons` + colunas `coupon_code`/`discount` em `orders`) — idem:
+rode o `supabase/schema.sql` atualizado de novo. Ele cria a tabela `coupons` e adiciona as colunas em
+`orders` de forma idempotente, sem afetar pedidos existentes. Depois é só registrar os comandos
+(`npm run deploy-commands`) para os novos `/cupom-*` aparecerem no Discord.
 
 ---
 
@@ -249,6 +274,9 @@ pm2 start src/index.js --name loja-bot
 pm2 save && pm2 startup    # reinicia junto com o sistema
 pm2 logs loja-bot          # acompanhar logs
 ```
+
+**Hospedar na nuvem (Fly.io):** há um guia completo de deploy (Docker + secrets + comandos)
+em **[DEPLOY-FLY.md](DEPLOY-FLY.md)** — sobe o bot 24/7 sem precisar de servidor próprio.
 
 ---
 
@@ -282,6 +310,9 @@ pm2 logs loja-bot          # acompanhar logs
 Detalhes de arquitetura, roteamento de interações, convenção de `customId` e responsabilidades de cada
 módulo estão em **[docs/ARQUITETURA.md](docs/ARQUITETURA.md)**.
 
+O sistema de **cupons de desconto** (fluxo do cliente, comandos da equipe, cálculo do desconto e modelo de
+dados) está documentado em **[docs/CUPONS.md](docs/CUPONS.md)**.
+
 ### Estrutura de arquivos
 
 ```
@@ -299,12 +330,14 @@ src/
     supabase.js         # cliente Supabase
   db/
     products.js         # CRUD de produtos
-    orders.js           # pedidos, itens e total
+    orders.js           # pedidos, itens, total e desconto do cupom
     sellers.js          # sócias/vendedoras (chave Pix de quem assume)
+    coupons.js          # cupons de desconto (CRUD + validação)
   interactions/
     router.js           # roteia botões/selects/modais/comandos
     tickets.js          # abrir/fechar/assumir ticket de atendimento
     catalog.js          # vitrine (browse), comprar, adicionar itens, carrinho
+    coupons.js          # aplicar/remover cupom no carrinho
     checkout.js         # gera Pix (QR + Copia e Cola) na chave de quem assumiu
     staff.js            # "já paguei", aprovar, recusar, copiar pix
 supabase/schema.sql     # schema do banco

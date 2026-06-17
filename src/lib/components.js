@@ -20,6 +20,10 @@ export const IDS = {
   qtyInput: 'qty_input',      // campo de texto do modal de quantidade
   checkout: 'checkout',       // botão "finalizar / gerar Pix"
   clearCart: 'clear_cart',
+  applyCoupon: 'apply_coupon',// botão "aplicar cupom" -> abre modal
+  removeCoupon: 'remove_coupon', // botão "remover cupom" (aparece com cupom aplicado)
+  couponModal: 'coupon_modal',// modal do cupom
+  couponInput: 'coupon_input',// campo de texto do modal de cupom
   paidClaim: 'paid_claim',    // botão "já paguei" do cliente -> paid_claim:<orderId>
   approve: 'approve',         // approve:<orderId>
   reject: 'reject',           // reject:<orderId>
@@ -98,9 +102,9 @@ export function qtyModal(product, currentQty) {
     .addComponents(new ActionRowBuilder().addComponents(input));
 }
 
-// Botões de ação do carrinho.
-export function cartActionsRow(hasItems) {
-  return new ActionRowBuilder().addComponents(
+// Botões de ação do carrinho. Mostra "Remover cupom" só quando há um cupom aplicado.
+export function cartActionsRow(hasItems, hasCoupon = false) {
+  const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(IDS.checkout)
       .setLabel('Finalizar e gerar Pix')
@@ -108,11 +112,51 @@ export function cartActionsRow(hasItems) {
       .setEmoji('💳')
       .setDisabled(!hasItems),
     new ButtonBuilder()
+      .setCustomId(IDS.applyCoupon)
+      .setLabel(hasCoupon ? 'Trocar cupom' : 'Aplicar cupom')
+      .setStyle(ButtonStyle.Secondary)
+      .setEmoji('🏷️')
+      .setDisabled(!hasItems),
+  );
+
+  if (hasCoupon) {
+    row.addComponents(
+      new ButtonBuilder()
+        .setCustomId(IDS.removeCoupon)
+        .setLabel('Remover cupom')
+        .setStyle(ButtonStyle.Secondary)
+        .setEmoji('🗑️'),
+    );
+  }
+
+  row.addComponents(
+    new ButtonBuilder()
       .setCustomId(IDS.clearCart)
       .setLabel('Esvaziar')
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(!hasItems),
   );
+
+  return row;
+}
+
+// Modal pra digitar o código do cupom. Se já houver um aplicado, vem preenchido.
+export function couponModal(currentCode) {
+  const input = new TextInputBuilder()
+    .setCustomId(IDS.couponInput)
+    .setLabel('Código do cupom')
+    .setStyle(TextInputStyle.Short)
+    .setPlaceholder('Ex.: BEMVINDO10')
+    .setMinLength(1)
+    .setMaxLength(40)
+    .setRequired(true);
+
+  if (currentCode) input.setValue(currentCode);
+
+  return new ModalBuilder()
+    .setCustomId(IDS.couponModal)
+    .setTitle('Aplicar cupom de desconto')
+    .addComponents(new ActionRowBuilder().addComponents(input));
 }
 
 // Select menu da vitrine pública: lista o catálogo; ao escolher, mostra 1 ped.
@@ -149,14 +193,22 @@ export function pixBuyerRow(orderId) {
   );
 }
 
-// Botões da equipe (aparecem quando o cliente avisa que pagou).
-export function staffActionsRow(orderId) {
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`${IDS.copyPix}:${orderId}`)
-      .setLabel('Copiar Pix')
-      .setStyle(ButtonStyle.Secondary)
-      .setEmoji('📋'),
+// Botões da equipe (aparecem quando o cliente avisa que pagou). Em pedido gratuito
+// (cupom cobriu o total) não há Pix, então o botão "Copiar Pix" é omitido (withPix: false).
+export function staffActionsRow(orderId, { withPix = true } = {}) {
+  const row = new ActionRowBuilder();
+
+  if (withPix) {
+    row.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`${IDS.copyPix}:${orderId}`)
+        .setLabel('Copiar Pix')
+        .setStyle(ButtonStyle.Secondary)
+        .setEmoji('📋'),
+    );
+  }
+
+  row.addComponents(
     new ButtonBuilder()
       .setCustomId(`${IDS.approve}:${orderId}`)
       .setLabel('Aprovar')
@@ -168,6 +220,8 @@ export function staffActionsRow(orderId) {
       .setStyle(ButtonStyle.Danger)
       .setEmoji('⛔'),
   );
+
+  return row;
 }
 
 // Painel inicial (botão para abrir o catálogo dentro do ticket).

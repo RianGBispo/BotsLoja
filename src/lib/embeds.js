@@ -61,18 +61,58 @@ export function cartEmbed(order, items) {
     return `• **${i.product.name}**${qtyLabel} — ${brl(subtotal)}${each}`;
   });
   embed.setDescription(lines.join('\n'));
-  embed.addFields({ name: 'Total', value: brl(order.total) });
+
+  // Com cupom aplicado, mostra subtotal + linha do desconto antes do total.
+  const discount = Number(order.discount) || 0;
+  if (discount > 0) {
+    const subtotal = Number(order.total) + discount;
+    const couponLabel = order.coupon_code ? ` (${order.coupon_code})` : '';
+    embed.addFields(
+      { name: 'Subtotal', value: brl(subtotal), inline: true },
+      { name: `Desconto${couponLabel}`, value: `−${brl(discount)}`, inline: true },
+      { name: 'Total', value: brl(order.total), inline: true },
+    );
+  } else {
+    embed.addFields({ name: 'Total', value: brl(order.total) });
+  }
+
   embed.addFields({
     name: '​',
-    value: '_Use o menu abaixo para adicionar mais peds, ou finalize o pedido._',
+    value: '_Use o menu abaixo para adicionar mais peds, aplicar um cupom ou finalizar o pedido._',
   });
   return embed;
+}
+
+// Embed de pedido que ficou gratuito (cupom cobriu o total): sem Pix/QR, só itens + desconto.
+// Vai direto para a revisão da equipe, que confere e entrega o arquivo.
+export function freeOrderEmbed(order, items) {
+  const discount = Number(order.discount) || 0;
+  const subtotal = Number(order.total) + discount;
+  const couponLabel = order.coupon_code ? ` (${order.coupon_code})` : '';
+
+  return brandEmbed({ banner: false })
+    .setTitle(`🎁 Pedido gratuito — Pedido #${String(order.order_number).padStart(4, '0')}`)
+    .setDescription(
+      [
+        items.map((i) => itemLine(i)).join('\n'),
+        '',
+        `Subtotal: ${brl(subtotal)}`,
+        `Desconto${couponLabel}: −${brl(discount)}`,
+        `**Total: ${brl(order.total)}**`,
+        '',
+        '_O cupom cobriu o valor todo — **não há pagamento via Pix**. A equipe confere e entrega o ' +
+          'arquivo aqui no ticket._',
+      ].join('\n'),
+    );
 }
 
 // Embed do Pix com QR Code, Copia e Cola e instruções.
 export function pixEmbed(order, items, copiaECola, sellerName) {
   const txid = order.pix_txid;
   const lines = items.map((i) => itemLine(i));
+
+  const discount = Number(order.discount) || 0;
+  const subtotal = Number(order.total) + discount;
 
   // banner desligado: a imagem principal é o QR Code (attachment://pix.png).
   return brandEmbed({ banner: false })
@@ -81,6 +121,10 @@ export function pixEmbed(order, items, copiaECola, sellerName) {
       [
         lines.join('\n'),
         '',
+        discount > 0 ? `Subtotal: ${brl(subtotal)}` : null,
+        discount > 0
+          ? `Desconto${order.coupon_code ? ` (${order.coupon_code})` : ''}: −${brl(discount)}`
+          : null,
         `**Total: ${brl(order.total)}**`,
         sellerName ? `Pagamento para: **${sellerName}**` : null,
         '',
@@ -155,10 +199,21 @@ export function announceEmbed({ title, message, imageUrl }) {
 
 // Mensagem de venda registrada no canal #vendas.
 export function saleEmbed(order, items, buyerTag, approverTag) {
-  return brandEmbed()
+  const discount = Number(order.discount) || 0;
+  const embed = brandEmbed()
     .setColor(0x2ecc71) // verde de "venda concluída", sobrescreve a cor da marca
     .setTitle(`✅ Venda — Pedido #${String(order.order_number).padStart(4, '0')}`)
-    .setDescription(items.map((i) => itemLine(i)).join('\n'))
+    .setDescription(items.map((i) => itemLine(i)).join('\n'));
+
+  if (discount > 0) {
+    embed.addFields({
+      name: 'Cupom',
+      value: `${order.coupon_code || '—'} (−${brl(discount)})`,
+      inline: true,
+    });
+  }
+
+  return embed
     .addFields(
       { name: 'Total', value: brl(order.total), inline: true },
       { name: 'Comprador', value: buyerTag, inline: true },

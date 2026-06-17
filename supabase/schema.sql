@@ -68,6 +68,11 @@ create table if not exists orders (
 -- Para bancos já existentes (a coluna não é criada pelo "create table if not exists" acima):
 alter table orders add column if not exists claimed_by text;
 
+-- Cupom aplicado ao pedido (código + valor de desconto já calculado em reais).
+-- `total` continua sendo o valor a pagar (subtotal dos itens − discount).
+alter table orders add column if not exists coupon_code text;
+alter table orders add column if not exists discount numeric(10,2) not null default 0 check (discount >= 0);
+
 -- ---------------------------------------------------------------
 -- ITENS DO PEDIDO (carrinho): snapshot do preço no momento da compra
 -- ---------------------------------------------------------------
@@ -80,6 +85,43 @@ create table if not exists order_items (
   created_at timestamptz not null default now(),
   unique (order_id, product_id)
 );
+
+-- Adiciona um item ao carrinho de forma ATÔMICA (resolve a concorrência no banco):
+-- se o (order_id, product_id) já existir, soma na quantidade em vez de tentar inserir de
+-- novo. Sem isto, dois cliques/interações quase simultâneos para o mesmo produto disparam
+-- "duplicate key ... order_items_order_id_product_id_key" (erro 23505). Usada por db/orders.addItems.
+create or replace function add_order_item(
+  p_order_id uuid,
+  p_product_id uuid,
+  p_unit_price numeric,
+  p_qty integer default 1
+) returns void as $$
+  insert into order_items (order_id, product_id, unit_price, qty)
+  values (p_order_id, p_product_id, p_unit_price, p_qty)
+  on conflict (order_id, product_id)
+  do update set qty = order_items.qty + excluded.qty;
+$$ language sql;
+
+-- ---------------------------------------------------------------
+-- CUPONS DE DESCONTO: código que o cliente aplica no carrinho.
+--   type 'percent' -> value é a porcentagem (ex.: 10 = 10%)
+--   type 'fixed'   -> value é o desconto em reais (ex.: 20 = R$ 20)
+-- Regras opcionais: validade (expires_at) e limite de usos (max_uses/uses).
+-- O contador `uses` sobe quando o pedido é APROVADO pela equipe.
+-- ---------------------------------------------------------------
+create table if not exists coupons (
+  id          uuid primary key default gen_random_uuid(),
+  code        text unique not null,             -- sempre em MAIÚSCULAS (ex.: BEMVINDO10)
+  type        text not null check (type in ('percent','fixed')),
+  value       numeric(10,2) not null check (value > 0),
+  expires_at  timestamptz,                      -- nulo = nunca expira
+  max_uses    integer check (max_uses is null or max_uses > 0), -- nulo = ilimitado
+  uses        integer not null default 0,
+  active      boolean not null default true,
+  created_at  timestamptz not null default now()
+);
+
+create index if not exists idx_coupons_code on coupons(code);
 
 -- Atualiza updated_at em orders automaticamente
 create or replace function set_updated_at()

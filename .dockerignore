@@ -1,0 +1,10 @@
+node_modules
+.env
+*.log
+.DS_Store
+.git
+.gitignore
+fly.toml
+docs
+README.md
+DEPLOY-FLY.md

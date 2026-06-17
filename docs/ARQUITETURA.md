@@ -1,6 +1,7 @@
 # Arquitetura — Loja MoonLight
 
-Documentação técnica do bot. Para instalação e uso, veja o [README](../README.md).
+Documentação técnica do bot. Para instalação e uso, veja o [README](../README.md). O sistema de cupons
+de desconto tem documentação própria em [CUPONS.md](CUPONS.md).
 
 ---
 
@@ -109,7 +110,8 @@ centralizados em `IDS` (botões/selects de loja) e `TICKET_IDS` (tickets).
 ### `db/`
 - **`products.js`** — `listActiveProducts`, `getProduct`, `getProductsByIds`, `createProduct`.
 - **`orders.js`** — `getOpenOrderByChannel`, `getOrCreateOrder`, `updateOrder`, `getOrderItems`,
-  `addItems` (ignora duplicados e recalcula), `removeItem`, `recalcTotal`.
+  `addItems` (upsert atômico via função SQL `add_order_item` — soma na qtd em vez de duplicar, evitando o
+  erro 23505 em cliques concorrentes), `removeItem`, `recalcTotal`.
 - **`sellers.js`** — `getSellerByDiscordId(discordUserId)`: retorna a sócia **ativa** ligada àquele
   usuário do Discord (ou `null`). É daqui que sai a chave Pix de quem assumiu o ticket.
 

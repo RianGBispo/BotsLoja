@@ -1,4 +1,5 @@
 import { supabase } from '../lib/supabase.js';
+import { getCouponByCode, validateCoupon } from './coupons.js';
 
 // Retorna o pedido aberto (carrinho/pagamento) do ticket, ou null.
 export async function getOpenOrderByChannel(channelId) {
@@ -54,26 +55,30 @@ export async function getOrderItems(orderId) {
   return data;
 }
 
-// Adiciona itens ao carrinho. Se o produto já estiver no carrinho, soma +1 na
-// quantidade (uma unidade por vez que ele é escolhido); senão, insere com qty 1.
+// Adiciona itens ao carrinho. Se o produto já estiver no carrinho, soma na quantidade
+// (uma unidade por vez que ele é escolhido); senão, insere com a qtd do lote.
+//
+// Usa a função SQL `add_order_item` (INSERT ... ON CONFLICT DO UPDATE) em vez de
+// "ler → decidir → inserir/atualizar": o upsert é atômico, então cliques repetidos
+// ou interações concorrentes para o mesmo produto não estouram a constraint
+// unique(order_id, product_id) (erro 23505) — apenas somam na quantidade.
 export async function addItems(orderId, products) {
-  const existing = await getOrderItems(orderId);
-  const byProduct = new Map(existing.map((i) => [i.product_id, i]));
-
+  // Agrega duplicados do mesmo lote (ex.: o mesmo produto aparecendo duas vezes).
+  const byId = new Map();
   for (const p of products) {
-    const current = byProduct.get(p.id);
-    if (current) {
-      const { error } = await supabase
-        .from('order_items')
-        .update({ qty: current.qty + 1 })
-        .eq('id', current.id);
-      if (error) throw error;
-    } else {
-      const { error } = await supabase
-        .from('order_items')
-        .insert({ order_id: orderId, product_id: p.id, unit_price: p.price, qty: 1 });
-      if (error) throw error;
-    }
+    const entry = byId.get(p.id) || { product: p, qty: 0 };
+    entry.qty += 1;
+    byId.set(p.id, entry);
+  }
+
+  for (const { product, qty } of byId.values()) {
+    const { error } = await supabase.rpc('add_order_item', {
+      p_order_id: orderId,
+      p_product_id: product.id,
+      p_unit_price: product.price,
+      p_qty: qty,
+    });
+    if (error) throw error;
   }
   return recalcTotal(orderId);
 }
@@ -102,9 +107,31 @@ export async function removeItem(orderId, productId) {
   return recalcTotal(orderId);
 }
 
+// Recalcula o pedido: subtotal dos itens, desconto do cupom aplicado e total a pagar.
+// Se o cupom tiver expirado/esgotado/sumido desde que foi aplicado, ele é solto do
+// pedido automaticamente (coupon_code volta a null, discount a 0).
 export async function recalcTotal(orderId) {
   const items = await getOrderItems(orderId);
-  const total = items.reduce((s, i) => s + Number(i.unit_price) * i.qty, 0);
-  await updateOrder(orderId, { total });
-  return { total, items };
+  const subtotal = items.reduce((s, i) => s + Number(i.unit_price) * i.qty, 0);
+
+  const order = await getOrder(orderId);
+  let couponCode = order.coupon_code || null;
+  let discount = 0;
+  let coupon = null;
+
+  if (couponCode) {
+    coupon = await getCouponByCode(couponCode);
+    const res = validateCoupon(coupon, subtotal);
+    if (res.ok) {
+      discount = res.discount;
+    } else {
+      // Cupom não vale mais para este carrinho — solta do pedido.
+      couponCode = null;
+      coupon = null;
+    }
+  }
+
+  const total = Math.round(Math.max(0, subtotal - discount) * 100) / 100;
+  await updateOrder(orderId, { total, discount, coupon_code: couponCode });
+  return { subtotal, discount, total, items, coupon };
 }

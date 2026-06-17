@@ -19,6 +19,7 @@ import {
   handlePaidClaim,
 } from './staff.js';
 import { handleOpenTicket, handleCloseTicket, handleClaim, TICKET_IDS } from './tickets.js';
+import { handleApplyCoupon, handleRemoveCoupon, handleCouponModal } from './coupons.js';
 
 // Separa "prefixo:dado" do customId.
 function parse(customId) {
@@ -42,6 +43,8 @@ export async function routeInteraction(interaction) {
         case IDS.buy:            return await handleBuy(interaction, arg);
         case IDS.checkout:       return await handleCheckout(interaction);
         case IDS.clearCart:      return await handleClearCart(interaction);
+        case IDS.applyCoupon:    return await handleApplyCoupon(interaction);
+        case IDS.removeCoupon:   return await handleRemoveCoupon(interaction);
         case IDS.paidClaim:      return await handlePaidClaim(interaction, arg);
         case IDS.copyPix:        return await handleCopyPix(interaction, arg);
         case IDS.approve:        return await handleApprove(interaction, arg);
@@ -62,6 +65,7 @@ export async function routeInteraction(interaction) {
       const { prefix, arg } = parse(interaction.customId);
       if (prefix === IDS.rejectModal) return await handleRejectModal(interaction, arg);
       if (prefix === IDS.qtyModal) return await handleQtyModal(interaction, arg);
+      if (prefix === IDS.couponModal) return await handleCouponModal(interaction);
       if (prefix === IDS.announceModal) return await handleAnnounceModal(interaction, arg);
       return;
     }
